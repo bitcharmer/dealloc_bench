@@ -51,14 +51,17 @@ void read_loop(char* addr) {
     while (idx + (BATCH_SIZE * PG_SIZE) < MAP_SIZE) {
         long long int start = now();
 
+        // perform some writes in a batch (one per page)
         for (int i = 0; i < BATCH_SIZE; i++) {
             *(addr + idx) = 0xAA;
             idx += PG_SIZE;
         }
 
+        // record duration of a batch in the histo
         long long int finish = now();
         hdr_record_value(histo, (finish - start) / BATCH_SIZE);
 
+        // report results periodically and reset the histo
         if (idx % REPORT_EVERY == 0) {
             printf("mean: %.2f, min: %ld, 50th: %ld, 90th: %ld, 99th: %ld, max: %ld\n",
                     hdr_mean(histo), hdr_min(histo), hdr_value_at_percentile(histo, 50), hdr_value_at_percentile(histo, 90), hdr_value_at_percentile(histo, 99), hdr_max(histo));
@@ -67,38 +70,43 @@ void read_loop(char* addr) {
     }
 }
 
+// parallel writer thread function
 void read_in_background(struct thread_args *args) {
     long long cpu = 1L << args->target_cpu;
     sched_setaffinity(0, sizeof(cpu), (const cpu_set_t *) &cpu);
-    printf("Running on cpu %d\n", sched_getcpu());
+    printf("Parallel writer running on cpu %d\n", sched_getcpu());
 
+    // loop over the first mmapped file to fill in the TLB
     read_loop(args->addr1);
-    printf("Finished first read loop, starting second\n");
+    puts("Finished first read loop, starting second");
 
+    // loop infinitely over the second mmapped file
     while(1) read_loop(args->addr2);
 }
 
 int main() {
+    // pin to isolated cpu
     long long cpu = 1L << 22;
     sched_setaffinity(0, sizeof(cpu), (const cpu_set_t *) &cpu);
 
+    // init histo
     hdr_init(1, INT64_C(3600000000), 3, &histo);
 
+    // create, mmap and pre-fault the files
     char* addr1 = create_mapping("/dev/shm/file01");
     char* addr2 = create_mapping("/dev/shm/file02");
 
+    // start the parallel writer
     pthread_t reader_thread;
     struct thread_args args = {.addr1 = addr1, .addr2 = addr2, .target_cpu = 23};
     pthread_create(&reader_thread, NULL, (void *(*)(void *)) read_in_background, &args);
 
+    sleep(3); // give the parallel writer enough time to loop over the 1st file and do a few runs over the 2nd file
+    puts("Unmapping...");
+    munmap(addr1, MAP_SIZE); // unmap the 1st file
+    puts("Unmapped...");
     sleep(3);
-    printf("Unmapping...\n");
-    munmap(addr1, MAP_SIZE);
-    printf("Unmapped...\n");
-    sleep(3);
-
-    printf("Done\n");
-    fflush(stdout);
+    fflush(stdout); // old habits
 }
 
 
